@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: ssl-server
+server:
+  port: 7777
+  gm-ssl:
+    ssl-gm-port: 8888
+    enabled: true
+    provider: Kona
+    trust-store-provider: Kona
+    trust-store-type: PKCS12
+    trust-store: ssl/truststore.p12
+    trust-store-password: 123456
+    key-store-provider: Kona
+    key-store-type: PKCS12
+    key-store: ssl/keystore.p12
+    key-store-password: 123456
+    # This context protocol supports TLCPv1.1, TLSv1.3 and TLSv1.2,
+    # and will take the providers from TencentKonaSMSuite to work.
+    protocol: TLCP
+    #required,强制要求客户端提供证书，如果客户端没有证书或证书无效，连接会被拒绝
+    #optional,客户端可以选择提供证书，如果提供了会进行验证，不提供也允许连接
+    #none,不验证客户端证书（默认行为）
+    client-auth: required
+#  http2:
+#    enabled: true
+logging:
+  level:
+    root: info

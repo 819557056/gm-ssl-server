@@ -1,0 +1,16 @@
+
+
+cat ca_server_sign.crt ca.crt > combined_server_cert.pem
+cat ca_server_enc.crt ca.crt > combined_enc_server_cert.pem
+#2生成 签名证书keystore.p12与加密证书keystore_enc.p12 文件
+/usr/local/tongsuo/bin/openssl pkcs12 -export -out keystore.p12 -in combined_server_cert.pem -inkey ca_server_sign.key -name server_sign -password pass:123456
+/usr/local/tongsuo/bin/openssl pkcs12 -export -out keystore_enc.p12 -in combined_enc_server_cert.pem -inkey ca_server_enc.key -name server_enc -password pass:123456
+#3合并
+/usr/local/angie/certs/TencentKona-17.0.12.b1/bin/keytool -importkeystore -srckeystore keystore_enc.p12 -srcstoretype PKCS12 -srcstorepass 123456 -destkeystore keystore.p12 -deststoretype PKCS12 -deststorepass 123456
+
+生成truststore.p12文件
+/usr/local/angie/certs/TencentKona-17.0.12.b1/bin/keytool -importcert -file ca.crt -keystore truststore.p12 -storetype PKCS12 -alias ca
+
+#验证文件
+/usr/local/angie/certs/TencentKona-17.0.12.b1/bin/keytool -list -v -keystore keystore.p12 -storetype PKCS12 -storepass 123456
+/usr/local/angie/certs/TencentKona-17.0.12.b1/bin/keytool -list -v -keystore truststore.p12 -storetype PKCS12 -storepass 123456
