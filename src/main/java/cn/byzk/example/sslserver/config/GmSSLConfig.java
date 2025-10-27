@@ -93,6 +93,12 @@ public class GmSSLConfig {
     @Value("${server.http2.enabled:false}")
     private boolean http2Enabled;
 
+    /**
+     * SSL Session 超时时间（秒），默认8小时
+     */
+    @Value("${server.gm-ssl.session-timeout:28800}")
+    private int sessionTimeout;
+
 
     public boolean isClientAuthEnabled() {
         return CLIENT_AUTH_REQUIRED.equals(clientAuth) || CLIENT_AUTH_OPTIONAL.equals(clientAuth);

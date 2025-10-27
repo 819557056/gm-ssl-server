@@ -49,6 +49,8 @@ import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.catalina.Context;
 import org.apache.catalina.connector.Connector;
 import org.apache.juli.logging.Log;
@@ -75,6 +77,10 @@ import com.tencent.kona.KonaProvider;
 @Configuration
 @Order(2)
 public class TomcatServer {
+
+    @Setter
+    @Getter
+    private static int globalSessionTimeout = 28800; // 默认8小时
 
     static {
         Security.addProvider(new KonaProvider());
@@ -120,6 +126,9 @@ public class TomcatServer {
     private Connector httpsConnector(GmSSLConfig gmSSLConfig)
             throws CertificateException, KeyStoreException, IOException,
             NoSuchAlgorithmException, NoSuchProviderException {
+        // 设置 SSL Session 超时时间
+        setGlobalSessionTimeout(gmSSLConfig.getSessionTimeout());
+        
         Connector connector = new Connector(
                 TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
         connector.setScheme("https");
@@ -204,7 +213,7 @@ public class TomcatServer {
 
         @Override
         public SSLUtil getSSLUtil(SSLHostConfigCertificate certificate) {
-            return new KonaSSLUtil(certificate);
+            return new KonaSSLUtil(certificate, getGlobalSessionTimeout());
         }
     }
 
@@ -214,6 +223,7 @@ public class TomcatServer {
 
         private Set<String> protocols;
         private Set<String> ciphersuites;
+        private int sessionTimeout = 28800; // 默认8小时
 
         public KonaSSLUtil(SSLHostConfigCertificate certificate) {
             super(certificate);
@@ -222,6 +232,17 @@ public class TomcatServer {
         public KonaSSLUtil(SSLHostConfigCertificate certificate,
                            boolean warnTls13) {
             super(certificate, warnTls13);
+        }
+
+        public KonaSSLUtil(SSLHostConfigCertificate certificate, int sessionTimeout) {
+            super(certificate);
+            this.sessionTimeout = sessionTimeout;
+        }
+
+        public KonaSSLUtil(SSLHostConfigCertificate certificate,
+                           boolean warnTls13, int sessionTimeout) {
+            super(certificate, warnTls13);
+            this.sessionTimeout = sessionTimeout;
         }
 
         @Override
@@ -286,7 +307,7 @@ public class TomcatServer {
         public org.apache.tomcat.util.net.SSLContext createSSLContextInternal(
                 List<String> negotiableProtocols)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
-            return new KonaSSLContext(sslHostConfig.getSslProtocol());
+            return new KonaSSLContext(sslHostConfig.getSslProtocol(), sessionTimeout);
         }
     }
 
@@ -296,10 +317,17 @@ public class TomcatServer {
         private final SSLContext context;
         private KeyManager[] kms;
         private TrustManager[] tms;
+        private int sessionTimeout = 28800; // 默认8小时
 
         public KonaSSLContext(String protocol)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
             context = SSLContext.getInstance(protocol, "Kona");
+        }
+
+        public KonaSSLContext(String protocol, int sessionTimeout)
+                throws NoSuchAlgorithmException, NoSuchProviderException {
+            context = SSLContext.getInstance(protocol, "Kona");
+            this.sessionTimeout = sessionTimeout;
         }
 
         @Override
@@ -308,6 +336,12 @@ public class TomcatServer {
             this.kms = kms;
             this.tms = tms;
             context.init(kms, tms, random);
+            
+            // 设置 SSL Session 超时时间
+            SSLSessionContext sessionContext = context.getServerSessionContext();
+            if (sessionContext != null) {
+                sessionContext.setSessionTimeout(sessionTimeout);
+            }
         }
 
         @Override
