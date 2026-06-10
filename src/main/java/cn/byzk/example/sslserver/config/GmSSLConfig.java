@@ -104,4 +104,16 @@ public class GmSSLConfig {
         return CLIENT_AUTH_REQUIRED.equals(clientAuth) || CLIENT_AUTH_OPTIONAL.equals(clientAuth);
     }
 
+    public String getEffectiveProvider() {
+        return KonaSecurityConstants.defaultProvider(provider);
+    }
+
+    public String getEffectiveKeyStoreProvider() {
+        return KonaSecurityConstants.defaultProvider(keyStoreProvider, getEffectiveProvider());
+    }
+
+    public String getEffectiveTrustStoreProvider() {
+        return KonaSecurityConstants.defaultProvider(trustStoreProvider, getEffectiveProvider());
+    }
+
 }

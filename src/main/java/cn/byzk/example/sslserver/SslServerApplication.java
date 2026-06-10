@@ -1,5 +1,6 @@
 package cn.byzk.example.sslserver;
 
+import cn.byzk.example.sslserver.config.KonaProviderRegistrar;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -7,7 +8,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class SslServerApplication {
 
     public static void main(String[] args) {
-        System.setProperty("com.tencent.kona.ssl.debug", "all");
+        KonaProviderRegistrar.register();
         SpringApplication.run(SslServerApplication.class, args);
     }
 

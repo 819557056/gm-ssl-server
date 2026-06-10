@@ -28,7 +28,6 @@ import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.SecureRandom;
-import java.security.Security;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
@@ -71,8 +70,6 @@ import org.springframework.util.ResourceUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.tencent.kona.KonaProvider;
-
 
 @Configuration
 @Order(2)
@@ -83,7 +80,7 @@ public class TomcatServer {
     private static int globalSessionTimeout = 28800; // 默认8小时
 
     static {
-        Security.addProvider(new KonaProvider());
+        KonaProviderRegistrar.register();
     }
 
     public static void main(String[] args) {
@@ -126,6 +123,8 @@ public class TomcatServer {
     private Connector httpsConnector(GmSSLConfig gmSSLConfig)
             throws CertificateException, KeyStoreException, IOException,
             NoSuchAlgorithmException, NoSuchProviderException {
+        KonaProviderRegistrar.register();
+
         // 设置 SSL Session 超时时间
         setGlobalSessionTimeout(gmSSLConfig.getSessionTimeout());
         
@@ -136,7 +135,7 @@ public class TomcatServer {
         connector.setProperty("sslImplementationName", KonaSSLImpl.class.getName());
         connector.setPort(gmSSLConfig.getPort());
 
-        SSLHostConfig sslConfig = new KonaSSLHostConfig();
+        SSLHostConfig sslConfig = new KonaSSLHostConfig(gmSSLConfig);
         SSLHostConfigCertificate certConfig = new SSLHostConfigCertificate(
                 sslConfig, SSLHostConfigCertificate.Type.EC);
 
@@ -148,13 +147,17 @@ public class TomcatServer {
          */
         sslConfig.setCertificateVerification(gmSSLConfig.getClientAuth());  // 启用强制客户端证书验证
 
+        certConfig.setCertificateKeystoreProvider(gmSSLConfig.getEffectiveKeyStoreProvider());
+        certConfig.setCertificateKeystoreType(gmSSLConfig.getKeyStoreType());
         certConfig.setCertificateKeystore(createKeyStore(
-                gmSSLConfig.getKeyStoreType(), gmSSLConfig.getKeyStorePath(),
+                gmSSLConfig.getKeyStoreType(), gmSSLConfig.getEffectiveKeyStoreProvider(),
+                gmSSLConfig.getKeyStorePath(),
                 gmSSLConfig.getKeyStorePassword().toCharArray()));
         certConfig.setCertificateKeystorePassword(gmSSLConfig.getKeyStorePassword());
         sslConfig.addCertificate(certConfig);
         sslConfig.setTrustStore(createKeyStore(
-                gmSSLConfig.getTrustStoreType(), gmSSLConfig.getTrustStorePath(),
+                gmSSLConfig.getTrustStoreType(), gmSSLConfig.getEffectiveTrustStoreProvider(),
+                gmSSLConfig.getTrustStorePath(),
                 gmSSLConfig.getTrustStorePassword().toCharArray()));
         connector.addSslHostConfig(sslConfig);
 
@@ -162,10 +165,10 @@ public class TomcatServer {
     }
 
     private static KeyStore createKeyStore(
-            String storeType, String storePath, char[] password)
+            String storeType, String storeProvider, String storePath, char[] password)
             throws KeyStoreException, IOException, CertificateException,
             NoSuchAlgorithmException, NoSuchProviderException {
-        KeyStore keyStore = KeyStore.getInstance(storeType, "Kona");
+        KeyStore keyStore = KeyStore.getInstance(storeType, storeProvider);
         try (InputStream in = new FileInputStream(
                 ResourceUtils.getFile(storePath))) {
             keyStore.load(in, password);
@@ -178,15 +181,31 @@ public class TomcatServer {
 
         private static final long serialVersionUID = 3931709572625017292L;
 
+        private final String sslProvider;
         private Set<String> protocols;
         private List<String> ciphersuites;
+
+        public KonaSSLHostConfig() {
+            this.sslProvider = KonaSecurityConstants.PROVIDER_KONA;
+        }
+
+        public KonaSSLHostConfig(GmSSLConfig gmSSLConfig) {
+            this.sslProvider = gmSSLConfig.getEffectiveProvider();
+            setSslProtocol(gmSSLConfig.getContextProtocol());
+            setTruststoreProvider(gmSSLConfig.getEffectiveTrustStoreProvider());
+            setTruststoreType(gmSSLConfig.getTrustStoreType());
+            setTruststorePassword(gmSSLConfig.getTrustStorePassword());
+            setSessionTimeout(gmSSLConfig.getSessionTimeout());
+        }
+
+        public String getSslProvider() {
+            return sslProvider;
+        }
 
         @Override
         public Set<String> getProtocols() {
             if (protocols == null) {
-                protocols = new HashSet<>();
-                protocols.add("TLCPv1.1");
-                protocols.add("TLSv1.3");
+                protocols = new HashSet<>(KonaSecurityConstants.GM_PROTOCOLS);
             }
 
             return protocols;
@@ -195,14 +214,7 @@ public class TomcatServer {
         @Override
         public List<String> getJsseCipherNames() {
             if (ciphersuites == null) {
-                ciphersuites = Collections.unmodifiableList(Arrays.asList(
-                        //"TLCP_ECC_SM4_GCM_SM3",
-                        "TLCP_ECC_SM4_CBC_SM3",
-                        //"TLCP_ECDHE_SM4_GCM_SM3",
-                        "TLCP_ECDHE_SM4_CBC_SM3"
-                        //"TLS_SM4_GCM_SM3",
-                        //"TLS_AES_128_GCM_SHA256"
-                ));
+                ciphersuites = Collections.unmodifiableList(KonaSecurityConstants.GM_CIPHER_SUITES);
             }
 
             return ciphersuites;
@@ -247,22 +259,25 @@ public class TomcatServer {
 
         @Override
         public KeyManager[] getKeyManagers() throws Exception {
-            KeyManagerFactory kmf = KeyManagerFactory.getInstance("NewSunX509", "Kona");
+            KeyManagerFactory kmf = KeyManagerFactory.getInstance(
+                    KonaSecurityConstants.KEY_MANAGER_ALGORITHM, sslProvider());
             kmf.init(certificate.getCertificateKeystore(),
                     certificate.getCertificateKeystorePassword().toCharArray());
             return kmf.getKeyManagers();
         }
 
-//        @Override
-//        public TrustManager[] getTrustManagers() throws Exception {
-//            KeyStore trustStore = sslHostConfig.getTruststore();
-//            if (trustStore != null) {
-//                TrustManagerFactory tmf = TrustManagerFactory.getInstance("PKIX", "Kona");
-//                tmf.init(trustStore);
-//                return tmf.getTrustManagers();
-//            }
-//            return null;
-//        }
+        @Override
+        public TrustManager[] getTrustManagers() throws Exception {
+            KeyStore trustStore = sslHostConfig.getTruststore();
+            if (trustStore != null) {
+                TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                        KonaSecurityConstants.TRUST_MANAGER_ALGORITHM, sslProvider());
+                tmf.init(trustStore);
+                return tmf.getTrustManagers();
+            }
+
+            return null;
+        }
 
         @Override
         protected Log getLog() {
@@ -272,9 +287,7 @@ public class TomcatServer {
         @Override
         protected Set<String> getImplementedProtocols() {
             if (protocols == null) {
-                protocols = new HashSet<>();
-                protocols.add("TLCPv1.1");
-                protocols.add("TLSv1.3");
+                protocols = new HashSet<>(KonaSecurityConstants.GM_PROTOCOLS);
             }
 
             return protocols;
@@ -283,15 +296,8 @@ public class TomcatServer {
         @Override
         protected Set<String> getImplementedCiphers() {
             if (ciphersuites == null) {
-                Set<String> temp = new HashSet<>();
-               // temp.add("TLCP_ECC_SM4_GCM_SM3");
-                temp.add("TLCP_ECC_SM4_CBC_SM3");
-              //  temp.add("TLCP_ECDHE_SM4_GCM_SM3");
-                temp.add("TLCP_ECDHE_SM4_CBC_SM3");
-              //  temp.add("TLS_SM4_GCM_SM3");
-              //  temp.add("TLS_AES_128_GCM_SHA256");
-
-                ciphersuites = Collections.unmodifiableSet(temp);
+                ciphersuites = Collections.unmodifiableSet(
+                        new HashSet<>(KonaSecurityConstants.GM_CIPHER_SUITES));
             }
 
             return ciphersuites;
@@ -307,7 +313,15 @@ public class TomcatServer {
         public org.apache.tomcat.util.net.SSLContext createSSLContextInternal(
                 List<String> negotiableProtocols)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
-            return new KonaSSLContext(sslHostConfig.getSslProtocol(), sessionTimeout);
+            return new KonaSSLContext(sslHostConfig.getSslProtocol(), sslProvider(), sessionTimeout);
+        }
+
+        private String sslProvider() {
+            if (sslHostConfig instanceof KonaSSLHostConfig) {
+                return ((KonaSSLHostConfig) sslHostConfig).getSslProvider();
+            }
+
+            return KonaSecurityConstants.PROVIDER_KONA;
         }
     }
 
@@ -321,12 +335,17 @@ public class TomcatServer {
 
         public KonaSSLContext(String protocol)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
-            context = SSLContext.getInstance(protocol, "Kona");
+            this(protocol, KonaSecurityConstants.PROVIDER_KONA, 28800);
         }
 
         public KonaSSLContext(String protocol, int sessionTimeout)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
-            context = SSLContext.getInstance(protocol, "Kona");
+            this(protocol, KonaSecurityConstants.PROVIDER_KONA, sessionTimeout);
+        }
+
+        public KonaSSLContext(String protocol, String provider, int sessionTimeout)
+                throws NoSuchAlgorithmException, NoSuchProviderException {
+            context = SSLContext.getInstance(protocol, provider);
             this.sessionTimeout = sessionTimeout;
         }
 
