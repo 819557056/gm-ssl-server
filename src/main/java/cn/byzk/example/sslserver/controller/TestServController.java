@@ -15,6 +15,7 @@ public class TestServController {
     @PostMapping("t1")
     public String testServer(UserDto user) {
 
+        log.warn("OK");
         user.setName("server");
         return "OK";
     }
