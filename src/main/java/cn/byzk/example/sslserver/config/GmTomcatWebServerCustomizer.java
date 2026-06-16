@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2023, 2024, THL A29 Limited, a Tencent company. All rights reserved.
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.
- *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
- *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- */
-
 package cn.byzk.example.sslserver.config;
 
 import java.io.FileInputStream;
@@ -48,87 +29,63 @@ import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 
-import lombok.Getter;
-import lombok.Setter;
-import org.apache.catalina.Context;
 import org.apache.catalina.connector.Connector;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
-import org.apache.tomcat.util.descriptor.web.SecurityCollection;
-import org.apache.tomcat.util.descriptor.web.SecurityConstraint;
 import org.apache.tomcat.util.net.SSLHostConfig;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate;
 import org.apache.tomcat.util.net.SSLUtil;
 import org.apache.tomcat.util.net.SSLUtilBase;
 import org.apache.tomcat.util.net.jsse.JSSEImplementation;
-import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory;
-import org.springframework.context.annotation.Bean;
+import org.springframework.boot.web.server.WebServerFactoryCustomizer;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.util.ResourceUtils;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * 正式项目 GM/TLCP Tomcat 接入方式。
+ *
+ * <p>仅在 server.ssl-mode=GM 时生效，不再新增第二个 Connector，
+ * 而是直接把 Spring Boot 当前管理的主 Connector 改造成 GM SSL Connector。</p>
+ */
+@Configuration
+@Order(0)
+@ConditionalOnProperty(prefix = "server", name = "ssl-mode", havingValue = "GM")
+public class GmTomcatWebServerCustomizer implements WebServerFactoryCustomizer<TomcatServletWebServerFactory> {
 
-@Order(2)
-public class TomcatServer {
+    private static int globalSessionTimeout = 28800;
 
-    @Setter
-    @Getter
-    private static int globalSessionTimeout = 28800; // 默认8小时
+    private final GmSSLConfig gmSSLConfig;
 
     static {
         KonaProviderRegistrar.register();
     }
 
-    public static void main(String[] args) {
-//        System.setProperty("com.tencent.kona.ssl.debug", "all");
-//        SpringApplication.run(TomcatServer.class, args);
-        new SpringApplicationBuilder(GmSSLConfig.class)
-                .child(TomcatServer.class)
-                .run(args);
+    public GmTomcatWebServerCustomizer(GmSSLConfig gmSSLConfig) {
+        this.gmSSLConfig = gmSSLConfig;
     }
 
-    @RestController
-    public static class ResponseController {
-
-        @GetMapping("/tomcat")
-        public String response() {
-            return "This is a testing server on Tencent Kona SM Suite";
-        }
-    }
-
-    @Bean
-    public TomcatServletWebServerFactory webServerFactory(GmSSLConfig gmSSLConfig)
-            throws CertificateException, KeyStoreException, IOException,
-            NoSuchAlgorithmException, NoSuchProviderException {
-        TomcatServletWebServerFactory tomcat = new TomcatServletWebServerFactory() {
-
-            @Override
-            protected void postProcessContext(Context context) {
-                SecurityConstraint securityConstraint = new SecurityConstraint();
-                securityConstraint.setUserConstraint("CONFIDENTIAL");
-                SecurityCollection collection = new SecurityCollection();
-                collection.addPattern("/*");
-                securityConstraint.addCollection(collection);
-                context.addConstraint(securityConstraint);
+    @Override
+    public void customize(TomcatServletWebServerFactory factory) {
+        factory.addConnectorCustomizers(connector -> {
+            try {
+                configureGmConnector(connector, gmSSLConfig);
+            } catch (Exception e) {
+                throw new IllegalStateException("初始化 GM SSL Tomcat 主 Connector 失败", e);
             }
-        };
-        tomcat.addAdditionalTomcatConnectors(httpsConnector(gmSSLConfig));
-        return tomcat;
+        });
     }
 
-    private Connector httpsConnector(GmSSLConfig gmSSLConfig)
+    private static void configureGmConnector(Connector connector, GmSSLConfig gmSSLConfig)
             throws CertificateException, KeyStoreException, IOException,
             NoSuchAlgorithmException, NoSuchProviderException {
         KonaProviderRegistrar.register();
+        globalSessionTimeout = gmSSLConfig.getSessionTimeout();
 
-        // 设置 SSL Session 超时时间
-        setGlobalSessionTimeout(gmSSLConfig.getSessionTimeout());
-        
-        Connector connector = new Connector(
-                TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
         connector.setScheme("https");
+        connector.setSecure(true);
         connector.setProperty("SSLEnabled", Boolean.toString(gmSSLConfig.isSslEnabled()));
         connector.setProperty("sslImplementationName", KonaSSLImpl.class.getName());
 
@@ -136,29 +93,25 @@ public class TomcatServer {
         SSLHostConfigCertificate certConfig = new SSLHostConfigCertificate(
                 sslConfig, SSLHostConfigCertificate.Type.EC);
 
-        // 添加客户端证书验证配置
-        /**
-         * required：强制要求客户端提供证书，如果客户端没有证书或证书无效，连接会被拒绝
-         * optional：客户端可以选择提供证书，如果提供了会进行验证，不提供也允许连接
-         * none：不验证客户端证书（默认行为）
-         */
-        sslConfig.setCertificateVerification(gmSSLConfig.getClientAuth());  // 启用强制客户端证书验证
+        sslConfig.setCertificateVerification(gmSSLConfig.getClientAuth());
 
         certConfig.setCertificateKeystoreProvider(gmSSLConfig.getEffectiveKeyStoreProvider());
         certConfig.setCertificateKeystoreType(gmSSLConfig.getKeyStoreType());
         certConfig.setCertificateKeystore(createKeyStore(
-                gmSSLConfig.getKeyStoreType(), gmSSLConfig.getEffectiveKeyStoreProvider(),
+                gmSSLConfig.getKeyStoreType(),
+                gmSSLConfig.getEffectiveKeyStoreProvider(),
                 gmSSLConfig.getKeyStorePath(),
                 gmSSLConfig.getKeyStorePassword().toCharArray()));
         certConfig.setCertificateKeystorePassword(gmSSLConfig.getKeyStorePassword());
+
         sslConfig.addCertificate(certConfig);
         sslConfig.setTrustStore(createKeyStore(
-                gmSSLConfig.getTrustStoreType(), gmSSLConfig.getEffectiveTrustStoreProvider(),
+                gmSSLConfig.getTrustStoreType(),
+                gmSSLConfig.getEffectiveTrustStoreProvider(),
                 gmSSLConfig.getTrustStorePath(),
                 gmSSLConfig.getTrustStorePassword().toCharArray()));
-        connector.addSslHostConfig(sslConfig);
 
-        return connector;
+        connector.addSslHostConfig(sslConfig);
     }
 
     private static KeyStore createKeyStore(
@@ -166,11 +119,9 @@ public class TomcatServer {
             throws KeyStoreException, IOException, CertificateException,
             NoSuchAlgorithmException, NoSuchProviderException {
         KeyStore keyStore = KeyStore.getInstance(storeType, storeProvider);
-        try (InputStream in = new FileInputStream(
-                ResourceUtils.getFile(storePath))) {
+        try (InputStream in = new FileInputStream(ResourceUtils.getFile(storePath))) {
             keyStore.load(in, password);
         }
-
         return keyStore;
     }
 
@@ -181,10 +132,6 @@ public class TomcatServer {
         private final String sslProvider;
         private Set<String> protocols;
         private List<String> ciphersuites;
-
-        public KonaSSLHostConfig() {
-            this.sslProvider = KonaSecurityConstants.PROVIDER_KONA;
-        }
 
         public KonaSSLHostConfig(GmSSLConfig gmSSLConfig) {
             this.sslProvider = gmSSLConfig.getEffectiveProvider();
@@ -204,7 +151,6 @@ public class TomcatServer {
             if (protocols == null) {
                 protocols = new HashSet<>(KonaSecurityConstants.GM_PROTOCOLS);
             }
-
             return protocols;
         }
 
@@ -213,7 +159,6 @@ public class TomcatServer {
             if (ciphersuites == null) {
                 ciphersuites = Collections.unmodifiableList(KonaSecurityConstants.GM_CIPHER_SUITES);
             }
-
             return ciphersuites;
         }
     }
@@ -222,7 +167,7 @@ public class TomcatServer {
 
         @Override
         public SSLUtil getSSLUtil(SSLHostConfigCertificate certificate) {
-            return new KonaSSLUtil(certificate, getGlobalSessionTimeout());
+            return new KonaSSLUtil(certificate, globalSessionTimeout);
         }
     }
 
@@ -232,25 +177,10 @@ public class TomcatServer {
 
         private Set<String> protocols;
         private Set<String> ciphersuites;
-        private int sessionTimeout = 28800; // 默认8小时
-
-        public KonaSSLUtil(SSLHostConfigCertificate certificate) {
-            super(certificate);
-        }
-
-        public KonaSSLUtil(SSLHostConfigCertificate certificate,
-                           boolean warnTls13) {
-            super(certificate, warnTls13);
-        }
+        private final int sessionTimeout;
 
         public KonaSSLUtil(SSLHostConfigCertificate certificate, int sessionTimeout) {
             super(certificate);
-            this.sessionTimeout = sessionTimeout;
-        }
-
-        public KonaSSLUtil(SSLHostConfigCertificate certificate,
-                           boolean warnTls13, int sessionTimeout) {
-            super(certificate, warnTls13);
             this.sessionTimeout = sessionTimeout;
         }
 
@@ -266,14 +196,14 @@ public class TomcatServer {
         @Override
         public TrustManager[] getTrustManagers() throws Exception {
             KeyStore trustStore = sslHostConfig.getTruststore();
-            if (trustStore != null) {
-                TrustManagerFactory tmf = TrustManagerFactory.getInstance(
-                        KonaSecurityConstants.TRUST_MANAGER_ALGORITHM, sslProvider());
-                tmf.init(trustStore);
-                return tmf.getTrustManagers();
+            if (trustStore == null) {
+                return null;
             }
 
-            return null;
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                    KonaSecurityConstants.TRUST_MANAGER_ALGORITHM, sslProvider());
+            tmf.init(trustStore);
+            return tmf.getTrustManagers();
         }
 
         @Override
@@ -286,29 +216,24 @@ public class TomcatServer {
             if (protocols == null) {
                 protocols = new HashSet<>(KonaSecurityConstants.GM_PROTOCOLS);
             }
-
             return protocols;
         }
 
         @Override
         protected Set<String> getImplementedCiphers() {
             if (ciphersuites == null) {
-                ciphersuites = Collections.unmodifiableSet(
-                        new HashSet<>(KonaSecurityConstants.GM_CIPHER_SUITES));
+                ciphersuites = Collections.unmodifiableSet(new HashSet<>(KonaSecurityConstants.GM_CIPHER_SUITES));
             }
-
             return ciphersuites;
         }
 
         @Override
         protected boolean isTls13RenegAuthAvailable() {
-            // TLS 1.3 does not support authentication after the initial handshake
             return false;
         }
 
         @Override
-        public org.apache.tomcat.util.net.SSLContext createSSLContextInternal(
-                List<String> negotiableProtocols)
+        public org.apache.tomcat.util.net.SSLContext createSSLContextInternal(List<String> negotiableProtocols)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
             return new KonaSSLContext(sslHostConfig.getSslProtocol(), sslProvider(), sessionTimeout);
         }
@@ -317,43 +242,29 @@ public class TomcatServer {
             if (sslHostConfig instanceof KonaSSLHostConfig) {
                 return ((KonaSSLHostConfig) sslHostConfig).getSslProvider();
             }
-
             return KonaSecurityConstants.PROVIDER_KONA;
         }
     }
 
-    public static class KonaSSLContext
-            implements org.apache.tomcat.util.net.SSLContext {
+    public static class KonaSSLContext implements org.apache.tomcat.util.net.SSLContext {
 
         private final SSLContext context;
         private KeyManager[] kms;
         private TrustManager[] tms;
-        private int sessionTimeout = 28800; // 默认8小时
-
-        public KonaSSLContext(String protocol)
-                throws NoSuchAlgorithmException, NoSuchProviderException {
-            this(protocol, KonaSecurityConstants.PROVIDER_KONA, 28800);
-        }
-
-        public KonaSSLContext(String protocol, int sessionTimeout)
-                throws NoSuchAlgorithmException, NoSuchProviderException {
-            this(protocol, KonaSecurityConstants.PROVIDER_KONA, sessionTimeout);
-        }
+        private final int sessionTimeout;
 
         public KonaSSLContext(String protocol, String provider, int sessionTimeout)
                 throws NoSuchAlgorithmException, NoSuchProviderException {
-            context = SSLContext.getInstance(protocol, provider);
+            this.context = SSLContext.getInstance(protocol, provider);
             this.sessionTimeout = sessionTimeout;
         }
 
         @Override
-        public void init(KeyManager[] kms, TrustManager[] tms, SecureRandom random)
-                throws KeyManagementException {
+        public void init(KeyManager[] kms, TrustManager[] tms, SecureRandom random) throws KeyManagementException {
             this.kms = kms;
             this.tms = tms;
             context.init(kms, tms, random);
-            
-            // 设置 SSL Session 超时时间
+
             SSLSessionContext sessionContext = context.getServerSessionContext();
             if (sessionContext != null) {
                 sessionContext.setSessionTimeout(sessionTimeout);
@@ -388,9 +299,12 @@ public class TomcatServer {
         public X509Certificate[] getCertificateChain(String alias) {
             X509Certificate[] result = null;
             if (kms != null) {
-                for (int i = 0; i < kms.length && result == null; i++) {
-                    if (kms[i] instanceof X509KeyManager) {
-                        result = ((X509KeyManager) kms[i]).getCertificateChain(alias);
+                for (KeyManager km : kms) {
+                    if (km instanceof X509KeyManager) {
+                        result = ((X509KeyManager) km).getCertificateChain(alias);
+                        if (result != null) {
+                            break;
+                        }
                     }
                 }
             }

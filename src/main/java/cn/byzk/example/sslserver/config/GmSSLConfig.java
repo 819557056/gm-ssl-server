@@ -45,10 +45,7 @@ public class GmSSLConfig {
      */
     public static String CLIENT_AUTH_NONE = "none";
 
-    @Value("${server.gm-ssl.ssl-gm-port}")
-    private int port;
-
-    @Value("${server.gm-ssl.enabled}")
+        @Value("${server.gm-ssl.enabled}")
     private boolean sslEnabled;
 
     @Value("${server.gm-ssl.provider:#{null}}")
