@@ -1275,3 +1275,457 @@ server:
 | `server.gm-ssl.*` | GM 模式使用，交给自定义 Tomcat GM SSL 逻辑 |
 | `server.gm-ssl.protocol` | GM SSLContext 使用的协议，例如 `TLCP` |
 
+# 附录A：本次改造踩坑记录与最终结论
+
+## A.1 改造目标
+
+原 Demo 方案：
+
+```text
+TomcatServer
+    ├── SpringApplicationBuilder(...).child(...)
+    ├── 新建 TomcatServletWebServerFactory
+    └── addAdditionalTomcatConnectors(...)
+```
+
+属于验证性质方案。
+
+正式项目要求：
+
+```text
+RSA 与 GM 二选一
+只保留一个业务端口
+不额外创建 Connector
+不额外启动 Spring 上下文
+```
+
+最终目标：
+
+```text
+RSA 模式
+    -> Spring Boot 原生 SSL
+
+GM 模式
+    -> Kona + TLCP
+    -> 接管 Spring Boot 主 Connector
+```
+
+---
+
+## A.2 第一次设计的问题
+
+最开始沿用了 Demo 中的配置：
+
+```yaml
+server:
+  gm-ssl:
+    ssl-gm-port: 8888
+```
+
+并在：
+
+```java
+GmSSLConfig
+```
+
+中定义：
+
+```java
+@Value("${server.gm-ssl.ssl-gm-port}")
+private int port;
+```
+
+正式方案中已经取消：
+
+```text
+addAdditionalTomcatConnectors(...)
+```
+
+因此：
+
+```text
+ssl-gm-port
+```
+
+已经没有意义。
+
+结果启动时报错：
+
+```text
+Could not resolve placeholder
+'server.gm-ssl.ssl-gm-port'
+```
+
+### 修复
+
+删除：
+
+```java
+@Value("${server.gm-ssl.ssl-gm-port}")
+private int port;
+```
+
+删除：
+
+```java
+gmSSLConfig.getPort()
+```
+
+统一使用：
+
+```yaml
+server:
+  port: 8888
+```
+
+作为唯一端口。
+
+---
+
+## A.3 第二个问题：出现两个 HTTPS Connector
+
+启动日志：
+
+```text
+Tomcat initialized with ports
+8888 (https), -1 (https)
+```
+
+说明：
+
+```text
+新方案 Connector
++
+旧 Demo Connector
+```
+
+同时存在。
+
+最终报错：
+
+```text
+Connector["https-jsse-nio--1"]
+
+The connector cannot start since
+the specified port value of [-1]
+is invalid
+```
+
+### 根因
+
+旧类：
+
+```java
+TomcatServer
+```
+
+仍然存在：
+
+```java
+@Configuration
+```
+
+因此 Spring Boot 仍然加载：
+
+```java
+@Bean
+TomcatServletWebServerFactory
+```
+
+并创建旧 Connector。
+
+### 修复
+
+删除：
+
+```java
+@Configuration
+```
+
+使：
+
+```java
+TomcatServer
+```
+
+退化为：
+
+```text
+历史 Demo 代码
+```
+
+不再参与 Spring 容器。
+
+---
+
+## A.4 第三个问题：Spring Boot 默认 SSL 仍在参与
+
+日志：
+
+```text
+certificate type [EC]
+configured from keystore
+[/home/xxx/.keystore]
+using alias [tomcat]
+```
+
+说明：
+
+```text
+Spring Boot 默认 SSL
+```
+
+仍在初始化。
+
+而不是：
+
+```text
+KonaSSLImpl
+KonaSSLContext
+```
+
+完全接管。
+
+### 风险
+
+可能出现：
+
+```text
+Spring Boot JSSE SSL
++
+GM SSL
+```
+
+同时初始化。
+
+### 建议
+
+GM 模式下：
+
+```yaml
+server:
+  ssl:
+    enabled: false
+```
+
+必须关闭。
+
+由：
+
+```java
+GmTomcatWebServerCustomizer
+```
+
+接管 SSL。
+
+---
+
+## A.5 最终推荐配置
+
+### RSA 模式
+
+```yaml
+server:
+  ssl-mode: RSA
+
+  port: 8443
+
+  ssl:
+    enabled: true
+    key-store: xxx.p12
+    key-store-password: xxx
+    protocol: TLS
+```
+
+说明：
+
+```text
+完全使用 Spring Boot 原生 SSL
+```
+
+---
+
+### GM 模式
+
+```yaml
+server:
+  ssl-mode: GM
+
+  port: 8888
+
+  ssl:
+    enabled: false
+
+  gm-ssl:
+    enabled: true
+
+    provider: Kona
+
+    trust-store-provider: Kona
+    trust-store-type: PKCS12
+    trust-store: ssl/truststore.p12
+    trust-store-password: 123456
+
+    key-store-provider: Kona
+    key-store-type: PKCS12
+    key-store: ssl/keystore.p12
+    key-store-password: 123456
+
+    protocol: TLCP
+
+    client-auth: required
+
+    session-timeout: 28800
+```
+
+---
+
+## A.6 正式项目必须迁移的类
+
+```text
+KonaProviderRegistrar
+KonaSecurityConstants
+GmSSLConfig
+SslMode
+ServerSslModeProperties
+GmTomcatWebServerCustomizer
+```
+
+---
+
+## A.7 不建议迁移的 Demo 代码
+
+不要迁移：
+
+```java
+SpringApplicationBuilder(...).child(...)
+```
+
+不要迁移：
+
+```java
+addAdditionalTomcatConnectors(...)
+```
+
+不要迁移：
+
+```yaml
+server.gm-ssl.ssl-gm-port
+```
+
+不要迁移：
+
+```java
+TomcatServer.main()
+```
+
+---
+
+## A.8 正式项目最终结构
+
+```text
+config
+ ├── GmSSLConfig
+ ├── KonaProviderRegistrar
+ ├── KonaSecurityConstants
+ ├── SslMode
+ ├── ServerSslModeProperties
+ └── GmTomcatWebServerCustomizer
+```
+
+---
+
+## A.9 实施顺序（推荐）
+
+步骤1：
+
+```text
+引入 Kona 依赖
+```
+
+步骤2：
+
+```text
+注册 Kona Provider
+```
+
+步骤3：
+
+```text
+增加 ssl-mode
+```
+
+步骤4：
+
+```text
+实现 GmTomcatWebServerCustomizer
+```
+
+步骤5：
+
+```text
+关闭 server.ssl.enabled
+```
+
+步骤6：
+
+```text
+验证只存在一个 Connector
+```
+
+正确日志应类似：
+
+```text
+Tomcat initialized with port(s): 8888 (https)
+```
+
+不能出现：
+
+```text
+-1 (https)
+```
+
+步骤7：
+
+```text
+验证 SSLContext 来自 Kona
+```
+
+确认不是：
+
+```text
+/home/xxx/.keystore
+alias tomcat
+```
+
+这种 Spring Boot 默认 SSL 初始化日志。
+
+---
+
+## A.10 最终经验总结
+
+正式项目不要从：
+
+```text
+新增 Connector
+```
+
+思路出发。
+
+应从：
+
+```text
+接管 Spring Boot 当前主 Connector
+```
+
+思路出发。
+
+这样：
+
+```text
+一个端口
+一个 Connector
+一个 SSL 模式
+```
+
+最容易维护，也最符合 RSA/GM 二选一的业务要求。
